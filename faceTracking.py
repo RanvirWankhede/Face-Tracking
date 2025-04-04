@@ -1,149 +1,125 @@
 import cv2
 import dlib
 import numpy as np
-from datetime import datetime
 import time
-import os
 
+# Load CNN-based face detector
+cnn_detector = dlib.cnn_face_detection_model_v1("mmod_human_face_detector.dat")
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
-class FaceTracking:
-    def __init__(self):
-        print("Initializing FaceTracking...")
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        self.predictor_path = "shape_predictor_68_face_landmarks.dat"
+# Start webcam
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-        # Check if predictor file exists
-        if not os.path.exists(self.predictor_path):
-            raise FileNotFoundError(f"Predictor file '{self.predictor_path}' not found.")
+# Strike tracking
+strike_count = 0
+last_strike_time = 0  
 
-        self.predictor = dlib.shape_predictor(self.predictor_path)
-        self.detector = dlib.get_frontal_face_detector()
-        self.warning_count = 0
-        self.warning_limit = 3
-        self.baseline_horizontal_angle = None
-        self.baseline_vertical_position = None
-        self.warmup_frames = 50
-        self.frame_counter = 0
-        self.is_warmup_complete = False
-        print("FaceTracking initialized successfully.")
+# Accuracy tracking
+total_frames = 0
+face_detected_frames = 0
 
-    def log_timestamp(self, message):
-        """Logs a message with a timestamp."""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] {message}")
+# **Thresholds (Updated)**
+YAW_THRESHOLD = 200 
+PITCH_THRESHOLD = 10  
+DEAD_ZONE = 8  
+STRIKE_DELAY = 5  
 
-    def reset_baselines(self):
-        """Resets baseline angles and positions."""
-        self.baseline_horizontal_angle = None
-        self.baseline_vertical_position = None
-        print("Baselines reset.")
+# 3D Model Points for Head Pose Estimation
+model_points = np.array([
+    (0.0, 0.0, 0.0),  
+    (0.0, -330.0, -65.0),  
+    (-225.0, 170.0, -135.0),  
+    (225.0, 170.0, -135.0),  
+    (-150.0, -150.0, -125.0),  
+    (150.0, -150.0, -125.0)  
+], dtype="double")
 
-    def start_tracking(self):
-        """Starts the face tracking process."""
-        print("Starting face tracking...")
-        cap = cv2.VideoCapture(0)
+# Camera Calibration
+focal_length = 640
+center = (320, 240)
+camera_matrix = np.array([
+    [focal_length, 0, center[0]],
+    [0, focal_length, center[1]],
+    [0, 0, 1]
+], dtype="double")
 
-        # Check if the camera opened successfully
-        if not cap.isOpened():
-            raise RuntimeError("Error: Could not access the webcam. Make sure it's connected and available.")
+dist_coeffs = np.zeros((4, 1))  
 
-        self.log_timestamp("Face tracking started.")
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        continue
 
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    print("Error: Failed to capture frame from webcam.")
-                    break
+    total_frames += 1  
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = cnn_detector(gray, 1)  
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = self.detector(gray)
+    if not faces:  
+        print("ERROR: No face detected!")
+        cv2.putText(frame, "NO FACE DETECTED!", (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+        cv2.imshow("Live Proctoring", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue  
 
-                # Warm-up phase
-                if self.frame_counter < self.warmup_frames:
-                    cv2.putText(frame, "Adjust your position...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                    self.frame_counter += 1
-                    cv2.imshow('Face Tracking with Angle', frame)
-                    if self.frame_counter == self.warmup_frames:
-                        self.is_warmup_complete = True
-                        self.reset_baselines()
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                    continue
+    face_detected_frames += 1  
 
-                # Check for multiple faces
-                if len(faces) > 1:
-                    self.warning_count += 1
-                    warning_text = f"Warning {self.warning_count}/{self.warning_limit}: Multiple faces detected!"
-                    cv2.putText(frame, warning_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    if self.warning_count >= self.warning_limit:
-                        self.log_timestamp("Multiple faces detected too many times. Exiting.")
-                        break
-                    cv2.imshow('Face Tracking with Angle', frame)
-                    cv2.waitKey(1)
-                    time.sleep(5)
-                    continue
+    for face in faces:
+        face_rect = face.rect  
+        shape = predictor(gray, face_rect)
 
-                # Detected face process
-                for face in faces:
-                    landmarks = self.predictor(gray, face)
-                    x, y, w, h = face.left(), face.top(), face.width(), face.height()
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        image_points = np.array([
+            (shape.part(30).x, shape.part(30).y),  
+            (shape.part(8).x, shape.part(8).y),  
+            (shape.part(36).x, shape.part(36).y),  
+            (shape.part(45).x, shape.part(45).y),  
+            (shape.part(48).x, shape.part(48).y),  
+            (shape.part(54).x, shape.part(54).y)  
+        ], dtype="double")
 
-                    # Eye and nose tip landmarks
-                    left_eye = np.array([landmarks.part(36).x, landmarks.part(36).y])
-                    right_eye = np.array([landmarks.part(45).x, landmarks.part(45).y])
-                    nose_tip = np.array([landmarks.part(30).x, landmarks.part(30).y])
+        # SolvePnP to get head pose
+        success, rotation_vector, _ = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
 
-                    # Angle and deviation
-                    delta_x = right_eye[0] - left_eye[0]
-                    delta_y = right_eye[1] - left_eye[1]
-                    current_horizontal_angle = np.degrees(np.arctan2(delta_y, delta_x))
-                    current_vertical_position = nose_tip[1]
+        if success:
+            rmat, _ = cv2.Rodrigues(rotation_vector)
+            angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
+            yaw, pitch, roll = angles  
 
-                    if self.baseline_horizontal_angle is None:
-                        self.baseline_horizontal_angle = current_horizontal_angle
-                    if self.baseline_vertical_position is None:
-                        self.baseline_vertical_position = current_vertical_position
+            # Debugging: Print angles to terminal
+            print(f"Yaw: {int(yaw)}, Pitch: {int(pitch)}")  
 
-                    horizontal_deviation = abs(current_horizontal_angle - self.baseline_horizontal_angle)
-                    vertical_deviation = abs(current_vertical_position - self.baseline_vertical_position)
+            # Ignore small movements (Dead Zone)
+            if abs(yaw) < DEAD_ZONE and abs(pitch) < DEAD_ZONE:
+                continue  
 
-                    # Display tracking data
-                    angle_text = f"Angle: {current_horizontal_angle:.2f} degrees"
-                    deviation_text = f"Left-Right Deviation: {horizontal_deviation:.2f}, Up-Down Deviation: {vertical_deviation:.2f}"
-                    cv2.putText(frame, angle_text, (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    cv2.putText(frame, deviation_text, (x, y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # **Strike System**
+            if abs(yaw) > YAW_THRESHOLD or abs(pitch) > PITCH_THRESHOLD:  
+                if time.time() - last_strike_time > STRIKE_DELAY:  
+                    strike_count += 1
+                    last_strike_time = time.time()
+                    print(f"STRIKE {strike_count}/3 (Looking Away Detected!)")
 
-                    # Check for excessive movement
-                    if horizontal_deviation > 1.5 or vertical_deviation > 60:
-                        self.warning_count += 1
-                        warning_text = f"Warning {self.warning_count}/{self.warning_limit}: Excessive head movement detected!"
-                        cv2.putText(frame, warning_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        if self.warning_count >= self.warning_limit:
-                            self.log_timestamp("Excessive head movement too many times. Exiting.")
-                            break
-                        time.sleep(5)
-                        continue
-                if self.warning_count >= self.warning_limit:
-                    self.log_timestamp("Excessive head movement too many times. Exiting.")
-                    break
+                cv2.putText(frame, f"STRIKE {strike_count}/3", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
-                cv2.imshow('Face Tracking with Angle', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if strike_count >= 3:
+                    print("Exam Terminated Due to Multiple Warnings!")
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    break  
 
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-            self.log_timestamp("Face tracking ended.")
+    cv2.imshow("Live Proctoring", frame)
 
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-if __name__ == "__main__":
-    try:
-        tracker = FaceTracking()
-        tracker.start_tracking()
-    except Exception as e:
-        print(f"Failed to start face tracking: {e}")
+# **Calculate Accuracy**
+accuracy = (face_detected_frames / total_frames) * 100 if total_frames > 0 else 0
+print(f"\nCamera Accuracy: {accuracy:.2f}%")
+print(f"Total Frames Processed: {total_frames}")
+print(f"Frames with Face Detected: {face_detected_frames}")
+
+# Cleanup
+cap.release()
+cv2.destroyAllWindows()

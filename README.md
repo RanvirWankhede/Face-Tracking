@@ -1,1 +1,1 @@
-Repository for Eye-ball and face tracking developed using python openCV for B.tech Mega project. 
+Repository for face tracking developed using python openCV for B.tech Mega project. 

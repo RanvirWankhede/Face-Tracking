@@ -1,125 +1,145 @@
 import cv2
-import dlib
 import numpy as np
 import time
+import math
 
-# Initialize face detector and shape predictor (HOG-based)
-hog_detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+# Load OpenCV DNN face detector
+face_net = cv2.dnn.readNetFromCaffe("deploy.prototxt.txt", "res10_300x300_ssd_iter_140000.caffemodel")
 
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+# Initialize video capture
+cap = cv2.VideoCapture(0)
 
-# Strike & accuracy tracking
+# Initialize strike count and timers
 strike_count = 0
 last_strike_time = 0
-total_frames = 0
-face_detected_frames = 0
-exam_terminated = False
+cooldown_time = 6  # Avoid rapid strikes
+start_time = time.time()
+calm_start_duration = 5  # Wait time before strikes are allowed
 
-# Thresholds and constants
-YAW_THRESHOLD = 180
-PITCH_THRESHOLD = 10
-DEAD_ZONE = 12
-STRIKE_DELAY = 6
+# Dead zone thresholds
+DEAD_ZONE_YAW = 55
+DEAD_ZONE_PITCH = 40
+
+# Duration pose must persist to count as strike
+POSE_PERSISTENCE_DURATION = 2
+pose_start_time = None
+pose_active = False
+
+def auto_brightness(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    v = hsv[:, :, 2]
+    mean_v = np.mean(v)
+    if mean_v < 100:
+        factor = 130 / mean_v
+        hsv[:, :, 2] = np.clip(v * factor, 0, 255)
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    elif mean_v > 180:
+        factor = 180 / mean_v
+        hsv[:, :, 2] = np.clip(v * factor, 0, 255)
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return frame
 
 model_points = np.array([
-    (0.0, 0.0, 0.0),               # Nose tip
-    (0.0, -330.0, -65.0),          # Chin
-    (-225.0, 170.0, -135.0),       # Left eye
-    (225.0, 170.0, -135.0),        # Right eye
-    (-150.0, -150.0, -125.0),      # Left mouth
-    (150.0, -150.0, -125.0)        # Right mouth
+    (0.0, 0.0, 0.0),             # Nose tip
+    (0.0, -330.0, -65.0),        # Chin
+    (-225.0, 170.0, -135.0),     # Left eye left corner
+    (225.0, 170.0, -135.0),      # Right eye right corner
+    (-150.0, -150.0, -125.0),    # Left Mouth corner
+    (150.0, -150.0, -125.0)      # Right mouth corner
 ], dtype="double")
 
-# Camera calibration matrix
-focal_length = 640
-center = (320, 240)
-camera_matrix = np.array([
-    [focal_length, 0, center[0]],
-    [0, focal_length, center[1]],
-    [0, 0, 1]
-], dtype="double")
-
-dist_coeffs = np.zeros((4, 1))  # No lens distortion
-
-while cap.isOpened():
+while True:
     ret, frame = cap.read()
-    if not ret or frame is None:
-        continue
-
-    total_frames += 1
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = hog_detector(gray)
-
-    # If no face is detected, show warning
-    if len(faces) == 0:
-        cv2.putText(frame, "NO FACE DETECTED!", (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
-    # If more than one face is detected, treat it as a violation too
-    elif len(faces) > 1:
-        cv2.putText(frame, "MULTIPLE FACES DETECTED!", (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-        # Mark violation (no head pose in this case)
-        if time.time() - last_strike_time > STRIKE_DELAY:
-            strike_count += 1
-            last_strike_time = time.time()
-            print(f"STRIKE {strike_count}/3 - Multiple Faces Detected!")
-    else:
-        face_detected_frames += 1
-        # Process the first detected face
-        shape = predictor(gray, faces[0])
-        image_points = np.array([
-            (shape.part(30).x, shape.part(30).y),  # Nose tip
-            (shape.part(8).x, shape.part(8).y),    # Chin
-            (shape.part(36).x, shape.part(36).y),  # Left eye
-            (shape.part(45).x, shape.part(45).y),  # Right eye
-            (shape.part(48).x, shape.part(48).y),  # Left mouth
-            (shape.part(54).x, shape.part(54).y)   # Right mouth
-        ], dtype="double")
-        success, rotation_vector, _ = cv2.solvePnP(
-            model_points, image_points, camera_matrix, dist_coeffs)
-
-        if success:
-            rmat, _ = cv2.Rodrigues(rotation_vector)
-            angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
-            yaw, pitch, roll = int(angles[0]), int(angles[1]), int(angles[2])
-
-            # Display angles for debugging
-            cv2.putText(frame, f"Yaw: {yaw}  Pitch: {pitch}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-            # Ignore small movements (dead zone)
-            if abs(yaw) <= DEAD_ZONE and abs(pitch) <= DEAD_ZONE:
-                pass
-            # Check if head pose violation occurs
-            elif abs(yaw) > YAW_THRESHOLD or abs(pitch) > PITCH_THRESHOLD:
-                if time.time() - last_strike_time > STRIKE_DELAY:
-                    strike_count += 1
-                    last_strike_time = time.time()
-                    print(f"STRIKE {strike_count}/3 - Head Pose Violation!")
-                    cv2.putText(frame, f"STRIKE {strike_count}/3", (50, 70),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-
-    # Check if exam should be terminated
-    if strike_count >= 3 and not exam_terminated:
-        print("Exam Terminated Due to Multiple Violations!")
-        exam_terminated = True
-        cv2.putText(frame, "EXAM TERMINATED", (100, 150),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
-        cv2.imshow("Live Proctoring", frame)
-        cv2.waitKey(3000)
-        break  # Break out of the loop gracefully
-
-    cv2.imshow("Live Proctoring", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if not ret:
         break
 
-# After the loop, print accuracy stats
-accuracy = (face_detected_frames / total_frames) * 100 if total_frames > 0 else 0
-print(f"\nCamera Accuracy: {accuracy:.2f}%")
-print(f"Total Frames Processed: {total_frames}")
-print(f"Frames with Face Detected: {face_detected_frames}")
+    frame = cv2.flip(frame, 1)
+    frame = auto_brightness(frame)
+    h, w = frame.shape[:2]
 
-# Cleanup resources
+    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0,
+                                 (300, 300), (104.0, 177.0, 123.0))
+    face_net.setInput(blob)
+    detections = face_net.forward()
+
+    faces = []
+    suspicious_pose = False
+    pitch = yaw = 0
+
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.5:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            faces.append((startX, startY, endX, endY))
+            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            landmarks = [(int((startX + endX) / 2), int((startY + endY) / 2)),
+                         (int((startX + endX) / 2), endY),
+                         (startX, startY),
+                         (endX, startY),
+                         (startX, endY),
+                         (endX, endY)]
+
+            image_points = np.array(landmarks, dtype="double")
+            focal_length = w
+            center = (w / 2, h / 2)
+            camera_matrix = np.array([
+                [focal_length, 0, center[0]],
+                [0, focal_length, center[1]],
+                [0, 0, 1]
+            ], dtype="double")
+            dist_coeffs = np.zeros((4, 1))
+            success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
+            rmat, _ = cv2.Rodrigues(rotation_vector)
+            proj_matrix = np.hstack((rmat, translation_vector))
+            euler_angles = cv2.decomposeProjectionMatrix(proj_matrix)[6]
+
+            pitch, yaw = float(euler_angles[0]), float(euler_angles[1])
+
+            cv2.putText(frame, f"Pitch: {int(pitch)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Yaw: {int(yaw)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+            # Updated suspicious pose logic
+            if abs(yaw) > DEAD_ZONE_YAW or abs(pitch) > DEAD_ZONE_PITCH:
+                if not pose_active:
+                    pose_start_time = time.time()
+                    pose_active = True
+                elif time.time() - pose_start_time >= POSE_PERSISTENCE_DURATION:
+                    suspicious_pose = True
+            else:
+                if pose_active and (time.time() - pose_start_time < POSE_PERSISTENCE_DURATION):
+                    pass  # Wait for full duration before resetting
+                else:
+                    pose_active = False
+                    pose_start_time = None
+
+    current_time = time.time()
+    elapsed_time = current_time - start_time
+
+    if elapsed_time > calm_start_duration and current_time - last_strike_time > cooldown_time:
+        if len(faces) == 0:
+            strike_count += 1
+            last_strike_time = current_time
+            print("No face detected - Strike", strike_count)
+        elif len(faces) > 1:
+            strike_count += 1
+            last_strike_time = current_time
+            print("Multiple faces detected - Strike", strike_count)
+        elif suspicious_pose:
+            strike_count += 1
+            last_strike_time = current_time
+            print("Suspicious head pose - Strike", strike_count)
+
+    cv2.putText(frame, f"Strikes: {strike_count}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    cv2.imshow("DNN Proctoring System", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == 27 or strike_count >= 3:
+        break
+
 cap.release()
 cv2.destroyAllWindows()

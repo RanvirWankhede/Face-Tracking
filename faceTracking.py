@@ -17,8 +17,8 @@ start_time = time.time()
 calm_start_duration = 5  # Wait time before strikes are allowed
 
 # Dead zone thresholds
-DEAD_ZONE_YAW = 55
-DEAD_ZONE_PITCH = 40
+DEAD_ZONE_YAW = 80
+DEAD_ZONE_PITCH = 50
 
 # Duration pose must persist to count as strike
 POSE_PERSISTENCE_DURATION = 2
